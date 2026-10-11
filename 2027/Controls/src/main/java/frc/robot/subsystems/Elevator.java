@@ -1,5 +1,6 @@
 package frc.robot.subsystems;
 
+import com.ctre.phoenix6.CANBus;
 import com.ctre.phoenix6.hardware.TalonFX;
 import com.ctre.phoenix6.sim.TalonFXSimState;
 import dev.doglog.DogLog;
@@ -7,10 +8,10 @@ import org.wpilib.math.system.DCMotor;
 import org.wpilib.math.util.Units;
 import org.wpilib.system.RobotController;
 import org.wpilib.simulation.ElevatorSim;
+import org.wpilib.telemetry.Telemetry;
 import org.wpilib.smartdashboard.Mechanism2d;
 import org.wpilib.smartdashboard.MechanismLigament2d;
 import org.wpilib.smartdashboard.MechanismRoot2d;
-import org.wpilib.smartdashboard.SmartDashboard;
 import org.wpilib.util.Color;
 import org.wpilib.util.Color8Bit;
 import org.wpilib.command2.Command;
@@ -22,7 +23,7 @@ public class Elevator extends SubsystemBase {
   private final double kDrumDiameter = Units.inchesToMeters(1.0);
   private final double kRotationsPerMeter = kGearRatio / (Math.PI * kDrumDiameter);
 
-  private final TalonFX m_motor = new TalonFX(0);
+  private final TalonFX m_motor = new TalonFX(0, new CANBus());
 
   private ControlMode m_controlMode = ControlMode.VOLTAGE;
   private double m_targetVoltage = 0.0;
@@ -33,9 +34,7 @@ public class Elevator extends SubsystemBase {
     POSITION,
   }
 
-  public Elevator() {
-    SmartDashboard.putData("Elevator Viz", m_simViz);
-  }
+  public Elevator() {}
 
   public Command setVoltageCommand(double voltage) {
     return runOnce(
@@ -82,7 +81,7 @@ public class Elevator extends SubsystemBase {
     }
 
     DogLog.log("Elevator/Control Mode", m_controlMode);
-    DogLog.log("Elevator/Duty Cycle", m_motor.get());
+    DogLog.log("Elevator/Duty Cycle", m_motor.getDutyCycle().getValueAsDouble());
     DogLog.log("Elevator/Current Position (m)", currentPosition);
     DogLog.log("Elevator/Target Position (m)", m_targetPosition);
   }
@@ -97,12 +96,14 @@ public class Elevator extends SubsystemBase {
   private final double kPixelsPerMeter = 100.0;
   private final Mechanism2d m_simViz = new Mechanism2d(200, 300);
   private final MechanismRoot2d m_zRoot = m_simViz.getRoot("Z Root", 100, kBottomOffset);
+  // The rail is thinner than the carriage so the carriage stays visible no matter which
+  // root the dashboard draws on top (the SimGUI and AdvantageScope use different orders).
   private final MechanismLigament2d m_z =
-      m_zRoot.append(new MechanismLigament2d("Z", 220, 90, 10, new Color8Bit(Color.BLUE)));
+      m_zRoot.append(new MechanismLigament2d("Z", 220, 90, 4, new Color8Bit(Color.GRAY)));
   private final MechanismRoot2d m_carriageRoot = m_simViz.getRoot("Carriage", 0, 0);
   private final MechanismLigament2d m_carriage =
       m_carriageRoot.append(
-          new MechanismLigament2d("Carriage", 20, 90, 10, new Color8Bit(Color.YELLOW)));
+          new MechanismLigament2d("Carriage", 20, 90, 14, new Color8Bit(Color.YELLOW)));
 
   @Override
   public void simulationPeriodic() {
@@ -115,12 +116,16 @@ public class Elevator extends SubsystemBase {
     m_elevatorSim.update(Robot.periodSecs);
 
     // Convert motor rotations and motor rotations per second
-    motorSim.setRawRotorPosition(m_elevatorSim.getPositionMeters() * kRotationsPerMeter);
-    motorSim.setRotorVelocity(m_elevatorSim.getVelocityMetersPerSecond() * kRotationsPerMeter);
+    motorSim.setRawRotorPosition(m_elevatorSim.getPosition() * kRotationsPerMeter);
+    motorSim.setRotorVelocity(m_elevatorSim.getVelocity() * kRotationsPerMeter);
 
     // Update viz
     m_carriageRoot.setPosition(
-        100, kBottomOffset + m_elevatorSim.getPositionMeters() * kPixelsPerMeter);
+        100, kBottomOffset + m_elevatorSim.getPosition() * kPixelsPerMeter);
+
+    // Telemetry replaces SmartDashboard.putData() in 2027: it must be logged every loop.
+    // View it in the dashboard under NetworkTables -> Telemetry -> Elevator Viz.
+    Telemetry.log("Elevator Viz", m_simViz);
   }
   // --- END STUFF FOR SIMULATION ---
 }
