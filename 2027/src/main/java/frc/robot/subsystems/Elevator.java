@@ -33,9 +33,11 @@ public class Elevator extends SubsystemBase {
 
   private TunableDouble m_tunable_kP = DogLog.tunable("kP", 100.0);
   private TunableDouble m_tunable_kD = DogLog.tunable("kD", 3.0);
+  private TunableDouble m_tunable_kI = DogLog.tunable("kI", 200.0);
 
   private final Timer m_timer = new Timer();
   private double m_lastError = 0.0;
+  private double m_iError = 0.0;
 
   enum ControlMode {
     VOLTAGE,
@@ -60,6 +62,7 @@ public class Elevator extends SubsystemBase {
 
           m_timer.restart();
           m_lastError = m_targetPosition - getCurrentPosition();
+          m_iError = 0.0;
         });
   }
 
@@ -87,9 +90,11 @@ public class Elevator extends SubsystemBase {
         {
           double error = m_targetPosition - currentPosition;
           double dError = (error - m_lastError) / m_timer.get();
+          m_iError = m_iError + error * m_timer.get();
           double kP = m_tunable_kP.get();
           double kD = m_tunable_kD.get();
-          m_motor.setVoltage(error * kP + dError * kD);
+          double kI = m_tunable_kI.get();
+          m_motor.setVoltage(error * kP + dError * kD + m_iError * kI);
           m_timer.reset();
           m_lastError = error;
           break;
