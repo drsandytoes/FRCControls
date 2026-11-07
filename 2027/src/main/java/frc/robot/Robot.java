@@ -9,7 +9,7 @@ import org.wpilib.command2.Command;
 import org.wpilib.command2.CommandScheduler;
 
 public class Robot extends TimedRobot {
-  public static final double periodSecs = 0.02; // 50Hz; 0.2 would be 5Hz
+  public static final double periodSecs = 0.2; // 5Hz; 0.02 would be 50Hz
 
   private Command m_autonomousCommand;
 
