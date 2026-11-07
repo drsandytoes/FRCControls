@@ -5,6 +5,9 @@ import com.ctre.phoenix6.hardware.TalonFX;
 import com.ctre.phoenix6.sim.TalonFXSimState;
 import dev.doglog.DogLog;
 import org.wpilib.math.system.DCMotor;
+import org.wpilib.math.trajectory.TrapezoidProfile;
+import org.wpilib.math.trajectory.TrapezoidProfile.Constraints;
+import org.wpilib.math.trajectory.TrapezoidProfile.State;
 import org.wpilib.math.util.Units;
 import org.wpilib.system.RobotController;
 import org.wpilib.system.Timer;
@@ -40,6 +43,11 @@ public class Elevator extends SubsystemBase {
   private double m_lastError = 0.0;
   private double m_iError = 0.0;
 
+  private final Timer m_profileTimer = new Timer();
+  private final TrapezoidProfile m_profile = new TrapezoidProfile(new Constraints(1.0, 2.0));
+  private State m_startState = new State();
+  private State m_goalState = new State();
+
   enum ControlMode {
     VOLTAGE,
     POSITION,
@@ -62,8 +70,12 @@ public class Elevator extends SubsystemBase {
           m_targetPosition = setpoint;
 
           m_timer.restart();
-          m_lastError = m_targetPosition - getCurrentPosition();
+          m_lastError = 0.0; // the profile starts at the current position
           m_iError = 0.0;
+
+          m_profileTimer.restart();
+          m_startState = new State(getCurrentPosition(), getCurrentVelocity());
+          m_goalState = new State(m_targetPosition, 0.0);
         });
   }
 
@@ -89,7 +101,14 @@ public class Elevator extends SubsystemBase {
         }
       case POSITION:
         {
-          double error = m_targetPosition - currentPosition;
+          // Sample profile
+          final State profileState =
+              m_profile.calculate(m_profileTimer.get(), m_startState, m_goalState);
+          DogLog.log("Elevator/Profile Position (m)", profileState.position);
+          DogLog.log("Elevator/Profile Velocity (m per s)", profileState.velocity);
+
+          // PID control w/ trapezoidal profile
+          double error = profileState.position - currentPosition;
           double dError = (error - m_lastError) / m_timer.get();
           m_iError = m_iError + error * m_timer.get();
 
