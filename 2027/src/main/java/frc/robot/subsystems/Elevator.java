@@ -9,6 +9,7 @@ import org.wpilib.math.util.Units;
 import org.wpilib.system.RobotController;
 import org.wpilib.simulation.ElevatorSim;
 import org.wpilib.telemetry.Telemetry;
+import org.wpilib.tunable.TunableDouble;
 import org.wpilib.smartdashboard.Mechanism2d;
 import org.wpilib.smartdashboard.MechanismLigament2d;
 import org.wpilib.smartdashboard.MechanismRoot2d;
@@ -28,6 +29,8 @@ public class Elevator extends SubsystemBase {
   private ControlMode m_controlMode = ControlMode.VOLTAGE;
   private double m_targetVoltage = 0.0;
   private double m_targetPosition = 0.0;
+
+  private TunableDouble m_tunable_kP = DogLog.tunable("kP", 10.0);
 
   enum ControlMode {
     VOLTAGE,
@@ -75,7 +78,7 @@ public class Elevator extends SubsystemBase {
       case POSITION:
         {
           double error = m_targetPosition - currentPosition;
-          double kP = 10.0; // Volts / meter
+          double kP = m_tunable_kP.get();
           m_motor.setVoltage(error * kP);
           break;
         }
