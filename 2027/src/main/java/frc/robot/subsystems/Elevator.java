@@ -74,13 +74,9 @@ public class Elevator extends SubsystemBase {
         }
       case POSITION:
         {
-          if (currentPosition > m_targetPosition) {
-            m_motor.setVoltage(-12.0);
-          } else if (currentPosition < m_targetPosition) {
-            m_motor.setVoltage(12.0);
-          } else {
-            m_motor.setVoltage(0.0);
-          }
+          double error = m_targetPosition - currentPosition;
+          double kP = 10.0; // Volts / meter
+          m_motor.setVoltage(error * kP);
           break;
         }
     }
