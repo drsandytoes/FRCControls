@@ -105,6 +105,7 @@ public class Elevator extends SubsystemBase {
     DogLog.log("Elevator/Duty Cycle", m_motor.getDutyCycle().getValueAsDouble());
     DogLog.log("Elevator/Current Position (m)", currentPosition);
     DogLog.log("Elevator/Target Position (m)", m_targetPosition);
+    DogLog.log("Elevator/iError", m_iError);
   }
 
   // --- BEGIN STUFF FOR SIMULATION ---
