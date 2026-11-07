@@ -91,6 +91,13 @@ public class Elevator extends SubsystemBase {
           double error = m_targetPosition - currentPosition;
           double dError = (error - m_lastError) / m_timer.get();
           m_iError = m_iError + error * m_timer.get();
+
+          // Reset integral if position error is greater than |kIZone|
+          double kIZone = 0.05;
+          if (Math.abs(error) > kIZone) {
+            m_iError = 0.0;
+          }
+
           double kP = m_tunable_kP.get();
           double kD = m_tunable_kD.get();
           double kI = m_tunable_kI.get();
