@@ -34,6 +34,7 @@ public class Elevator extends SubsystemBase {
   private TunableDouble m_tunable_kP = DogLog.tunable("kP", 100.0);
   private TunableDouble m_tunable_kD = DogLog.tunable("kD", 3.0);
   private TunableDouble m_tunable_kI = DogLog.tunable("kI", 200.0);
+  private TunableDouble m_tunable_kIZone = DogLog.tunable("kIZone", 0.05);
 
   private final Timer m_timer = new Timer();
   private double m_lastError = 0.0;
@@ -93,7 +94,7 @@ public class Elevator extends SubsystemBase {
           m_iError = m_iError + error * m_timer.get();
 
           // Reset integral if position error is greater than |kIZone|
-          double kIZone = 0.05;
+          double kIZone = m_tunable_kIZone.get();
           if (Math.abs(error) > kIZone) {
             m_iError = 0.0;
           }
