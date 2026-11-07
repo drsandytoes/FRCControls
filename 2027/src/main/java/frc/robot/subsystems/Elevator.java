@@ -7,6 +7,7 @@ import dev.doglog.DogLog;
 import org.wpilib.math.system.DCMotor;
 import org.wpilib.math.util.Units;
 import org.wpilib.system.RobotController;
+import org.wpilib.system.Timer;
 import org.wpilib.simulation.ElevatorSim;
 import org.wpilib.telemetry.Telemetry;
 import org.wpilib.tunable.TunableDouble;
@@ -30,7 +31,11 @@ public class Elevator extends SubsystemBase {
   private double m_targetVoltage = 0.0;
   private double m_targetPosition = 0.0;
 
-  private TunableDouble m_tunable_kP = DogLog.tunable("kP", 10.0);
+  private TunableDouble m_tunable_kP = DogLog.tunable("kP", 100.0);
+  private TunableDouble m_tunable_kD = DogLog.tunable("kD", 3.0);
+
+  private final Timer m_timer = new Timer();
+  private double m_lastError = 0.0;
 
   enum ControlMode {
     VOLTAGE,
@@ -52,6 +57,9 @@ public class Elevator extends SubsystemBase {
         () -> {
           m_controlMode = ControlMode.POSITION;
           m_targetPosition = setpoint;
+
+          m_timer.restart();
+          m_lastError = m_targetPosition - getCurrentPosition();
         });
   }
 
@@ -78,8 +86,12 @@ public class Elevator extends SubsystemBase {
       case POSITION:
         {
           double error = m_targetPosition - currentPosition;
+          double dError = (error - m_lastError) / m_timer.get();
           double kP = m_tunable_kP.get();
-          m_motor.setVoltage(error * kP);
+          double kD = m_tunable_kD.get();
+          m_motor.setVoltage(error * kP + dError * kD);
+          m_timer.reset();
+          m_lastError = error;
           break;
         }
     }
