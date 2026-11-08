@@ -35,9 +35,9 @@ public class Elevator extends SubsystemBase {
   private double m_targetPosition = 0.0;
 
   private TunableDouble m_tunable_kP = DogLog.tunable("kP", 100.0);
-  private TunableDouble m_tunable_kD = DogLog.tunable("kD", 3.0);
-  private TunableDouble m_tunable_kI = DogLog.tunable("kI", 200.0);
-  private TunableDouble m_tunable_kIZone = DogLog.tunable("kIZone", 0.05);
+  private TunableDouble m_tunable_kD = DogLog.tunable("kD", 0.0);
+  private TunableDouble m_tunable_kI = DogLog.tunable("kI", 0.0);
+  private TunableDouble m_tunable_kIZone = DogLog.tunable("kIZone", 0.01);
 
   private final Timer m_timer = new Timer();
   private double m_lastError = 0.0;
@@ -107,28 +107,29 @@ public class Elevator extends SubsystemBase {
           DogLog.log("Elevator/Profile Position (m)", profileState.position);
           DogLog.log("Elevator/Profile Velocity (m per s)", profileState.velocity);
 
-          // // PID control w/ trapezoidal profile
-          // double error = profileState.position - currentPosition;
-          // double dError = (error - m_lastError) / m_timer.get();
-          // m_iError = m_iError + error * m_timer.get();
+          // PID control w/ trapezoidal profile
+          double error = profileState.position - currentPosition;
+          double dError = (error - m_lastError) / m_timer.get();
+          m_iError = m_iError + error * m_timer.get();
 
-          // // Reset integral if position error is greater than |kIZone|
-          // double kIZone = m_tunable_kIZone.get();
-          // if (Math.abs(error) > kIZone) {
-          //   m_iError = 0.0;
-          // }
+          // Reset integral if position error is greater than |kIZone|
+          double kIZone = m_tunable_kIZone.get();
+          if (Math.abs(error) > kIZone) {
+            m_iError = 0.0;
+          }
 
-          // double kP = m_tunable_kP.get();
-          // double kD = m_tunable_kD.get();
-          // double kI = m_tunable_kI.get();
-          // m_motor.setVoltage(error * kP + dError * kD + m_iError * kI);
-          // m_timer.reset();
-          // m_lastError = error;
+          double kP = m_tunable_kP.get();
+          double kD = m_tunable_kD.get();
+          double kI = m_tunable_kI.get();
 
           // Velocity + Gravity FF
           double kV = 4.6; // volts per meter per second
           double kG = 1.1; // volts
-          m_motor.setVoltage(kV * profileState.velocity + kG);
+
+          m_motor.setVoltage(
+              error * kP + dError * kD + m_iError * kI + kV * profileState.velocity + kG);
+          m_timer.reset();
+          m_lastError = error;
           break;
         }
     }
