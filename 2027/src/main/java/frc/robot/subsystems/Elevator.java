@@ -125,9 +125,10 @@ public class Elevator extends SubsystemBase {
           // m_timer.reset();
           // m_lastError = error;
 
-          // Velocity FF
+          // Velocity + Gravity FF
           double kV = 4.6; // volts per meter per second
-          m_motor.setVoltage(kV * profileState.velocity);
+          double kG = 1.1; // volts
+          m_motor.setVoltage(kV * profileState.velocity + kG);
           break;
         }
     }
