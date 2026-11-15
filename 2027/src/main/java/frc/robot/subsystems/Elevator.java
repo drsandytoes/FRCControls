@@ -12,6 +12,7 @@ import org.wpilib.math.util.Units;
 import org.wpilib.system.RobotController;
 import org.wpilib.simulation.ElevatorSim;
 import org.wpilib.telemetry.Telemetry;
+import org.wpilib.tunable.TunableDouble;
 import org.wpilib.smartdashboard.Mechanism2d;
 import org.wpilib.smartdashboard.MechanismLigament2d;
 import org.wpilib.smartdashboard.MechanismRoot2d;
@@ -34,6 +35,30 @@ public class Elevator extends SubsystemBase {
 
   // The TalonFX runs the profile and PIDF itself (Motion Magic); we just send it the target
   private final MotionMagicVoltage m_magic = new MotionMagicVoltage(0.0);
+  private final TalonFXConfiguration m_config = new TalonFXConfiguration();
+
+  // Tunable in motor rotations, under /Tunables/TalonFX/ (so old kP = 100 V/m values can't
+  // land here). Changing one pushes the new settings to the TalonFX right away.
+  private final TunableDouble m_tunable_kP =
+      DogLog.tunable("TalonFX/kP", 2.66, v -> { m_config.Slot0.kP = v; applyGains(); });
+  private final TunableDouble m_tunable_kI =
+      DogLog.tunable("TalonFX/kI", 0.0, v -> { m_config.Slot0.kI = v; applyGains(); });
+  private final TunableDouble m_tunable_kD =
+      DogLog.tunable("TalonFX/kD", 0.0, v -> { m_config.Slot0.kD = v; applyGains(); });
+  private final TunableDouble m_tunable_kG =
+      DogLog.tunable("TalonFX/kG", 1.1, v -> { m_config.Slot0.kG = v; applyGains(); });
+  private final TunableDouble m_tunable_kV =
+      DogLog.tunable("TalonFX/kV", 0.122, v -> { m_config.Slot0.kV = v; applyGains(); });
+  private final TunableDouble m_tunable_cruiseVelocity =
+      DogLog.tunable("TalonFX/CruiseVelocity", 37.6, v -> {
+        m_config.MotionMagic.MotionMagicCruiseVelocity = v;
+        applyProfileLimits();
+      });
+  private final TunableDouble m_tunable_acceleration =
+      DogLog.tunable("TalonFX/Acceleration", 75.2, v -> {
+        m_config.MotionMagic.MotionMagicAcceleration = v;
+        applyProfileLimits();
+      });
 
   enum ControlMode {
     VOLTAGE,
@@ -41,17 +66,33 @@ public class Elevator extends SubsystemBase {
   }
 
   public Elevator() {
-    // Units are motor rotations: our tuned values / 37.6 motor rotations per meter
-    TalonFXConfiguration config = new TalonFXConfiguration();
-    config.Slot0.kP = 2.66; // V per rotation of error (100 V/m)
-    config.Slot0.kI = 0.0;
-    config.Slot0.kD = 0.0;
-    config.Slot0.kG = 1.1; // V to hold against gravity (no unit conversion needed)
-    config.Slot0.kV = 0.122; // V per rotation/s (4.6 V per m/s)
-    config.Slot0.GravityType = GravityTypeValue.Elevator_Static;
-    config.MotionMagic.MotionMagicCruiseVelocity = 37.6; // rotations/s (1 m/s)
-    config.MotionMagic.MotionMagicAcceleration = 75.2; // rotations/s² (2 m/s²)
-    m_motor.getConfigurator().apply(config);
+    // Start from the tunables' values (motor rotations: our tuned values / 37.6 per meter)
+    m_config.Slot0.kP = m_tunable_kP.get(); // V per rotation of error (100 V/m)
+    m_config.Slot0.kI = m_tunable_kI.get();
+    m_config.Slot0.kD = m_tunable_kD.get();
+    m_config.Slot0.kG = m_tunable_kG.get(); // V to hold against gravity
+    m_config.Slot0.kV = m_tunable_kV.get(); // V per rotation/s (4.6 V per m/s)
+    m_config.Slot0.GravityType = GravityTypeValue.Elevator_Static;
+    m_config.MotionMagic.MotionMagicCruiseVelocity = m_tunable_cruiseVelocity.get(); // rot/s
+    m_config.MotionMagic.MotionMagicAcceleration = m_tunable_acceleration.get(); // rot/s²
+    m_motor.getConfigurator().apply(m_config);
+  }
+
+  // Sends just the changed group of settings to the TalonFX
+  private void applyGains() {
+    m_motor.getConfigurator().apply(m_config.Slot0);
+    System.out.printf(
+        "TalonFX gains: kP=%.3f kI=%.3f kD=%.3f kG=%.3f kV=%.3f%n",
+        m_config.Slot0.kP, m_config.Slot0.kI, m_config.Slot0.kD,
+        m_config.Slot0.kG, m_config.Slot0.kV);
+  }
+
+  private void applyProfileLimits() {
+    m_motor.getConfigurator().apply(m_config.MotionMagic);
+    System.out.printf(
+        "TalonFX profile: cruise %.1f rot/s, acceleration %.1f rot/s²%n",
+        m_config.MotionMagic.MotionMagicCruiseVelocity,
+        m_config.MotionMagic.MotionMagicAcceleration);
   }
 
   public Command setVoltageCommand(double voltage) {

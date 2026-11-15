@@ -204,7 +204,7 @@ public class ElevatorResponseTest {
   private static void writeCsv(List<Sample> samples) throws IOException {
     final Path dir = Path.of("build", "response");
     Files.createDirectories(dir);
-    final String tunables = tunablesSetting().replace(',', '_');
+    final String tunables = tunablesSetting().replace(',', '_').replace('/', '-');
     final Path file =
         dir.resolve(checkpointName() + (tunables.isEmpty() ? "" : "_" + tunables) + ".csv");
     try (PrintWriter out = new PrintWriter(Files.newBufferedWriter(file))) {
