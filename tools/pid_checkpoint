@@ -1,0 +1,474 @@
+#!/bin/zsh
+# Steps through the PID lesson's checkpoints (git tags <year>-<name>) and runs the simulator.
+#
+# Copy this script somewhere outside the repository before using it (e.g. ~/bin): checking
+# out an older checkpoint removes it from the working tree. The first command asks where the
+# FRCControls repository is and remembers it.
+#
+#   pid_checkpoint repo [<path>]        show, or set, the repository location
+#   pid_checkpoint list                 checkpoints in presentation order (* = current)
+#   pid_checkpoint go <name|#> [--run]  switch to a checkpoint ("p-control", "2027-pidf", "5")
+#   pid_checkpoint first [--run]        switch to the first checkpoint (where the lesson starts)
+#   pid_checkpoint last [--run]         switch to the last checkpoint
+#   pid_checkpoint next                 switch to the next checkpoint and run the simulator
+#   pid_checkpoint prev                 same, backward
+#   pid_checkpoint run                  (re)start the simulator at the current checkout
+#   pid_checkpoint stop                 stop the simulator
+#   pid_checkpoint status               where you are, whether the sim is running, last session
+#   pid_checkpoint summary [log]        summarize a session log (default: the latest)
+#   pid_checkpoint test [name|#] [kP=100,kD=3]   headless response test (another checkpoint
+#                                       runs in a temporary worktree; your checkout isn't touched)
+#   pid_checkpoint home                 back to the <year>-checkpoints branch (or main)
+#   pid_checkpoint replay <from> <to>   copy one year's checkpoints into the next year's folder
+#                                       (commit the imported <to> project first) and tag them
+#   pid_checkpoint retag <from> <to>    tag <to>'s replayed commits (after fixing a stopped replay)
+#
+# Switching stops a running simulator first, and stashes uncommitted edits (labeled with the
+# checkpoint they were made on; see `git stash list`). The simulator runs in the background,
+# logging to .git/pid_checkpoint/sim.log; when it closes you get a notification, and the next
+# pid_checkpoint command prints a summary of the session.
+#
+# Config: ~/.pid_checkpoint.config (repo=<path>). Env: PID_CHECKPOINT_REPO overrides the
+# saved path, PID_CHECKPOINT_CONFIG uses a different config file, and PID_CHECKPOINT_YEAR
+# picks the year (default: the newest year with checkpoint tags).
+set -euo pipefail
+
+SELF=${0:A}  # inside functions, zsh's $0 is the function name
+NAME=${SELF:t}
+CONFIG=${PID_CHECKPOINT_CONFIG:-$HOME/.pid_checkpoint.config}
+
+die() { echo "$NAME: $*" >&2; exit 1; }
+usage() { sed -n '2,/^set -euo/p' "$SELF" | sed '$d; s/^# \{0,1\}//'; }
+
+# --- Repository location ----------------------------------------------------------------
+
+# Checks a candidate path; prints its absolute form, or explains what's wrong and fails
+valid_repo() {
+  local p=${1/#\~/$HOME}
+  [[ -n $p ]] || { echo "No path given." >&2; return 1; }
+  [[ -d $p ]] || { echo "$p doesn't exist (or isn't a directory)." >&2; return 1; }
+  p=${p:A}
+  if ! git -C "$p" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "$p isn't a git repository." >&2; return 1
+  fi
+  local top=$(git -C "$p" rev-parse --show-toplevel)
+  [[ $top == $p ]] || echo "Using the repository's top level, $top." >&2
+  if [[ -z $(git -C "$top" tag -l '[0-9][0-9][0-9][0-9]-*') ]]; then
+    echo "Note: $top has no checkpoint tags yet (git fetch --tags?)." >&2
+  fi
+  print $top
+}
+
+save_repo() {
+  print "repo=$1" >"$CONFIG"
+  echo "Repository set to $1 (saved in $CONFIG)." >&2
+}
+
+# The configured repository; asks for it (and remembers it) the first time
+repo_path() {
+  if [[ -n ${PID_CHECKPOINT_REPO:-} ]]; then
+    valid_repo "$PID_CHECKPOINT_REPO" || die "PID_CHECKPOINT_REPO isn't usable"
+    return
+  fi
+  local saved=$(sed -n 's/^repo=//p' "$CONFIG" 2>/dev/null || true)
+  if [[ -n $saved ]]; then
+    [[ -d $saved ]] || die "the saved repository $saved no longer exists; set it with: $NAME repo <path>"
+    print $saved
+    return
+  fi
+  [[ -t 0 ]] || die "no repository set; run: $NAME repo <path to FRCControls>"
+  echo "Where is the FRCControls repository? (it's remembered for next time)" >&2
+  local answer top
+  while true; do
+    read -r "answer?Path: " || die "no repository set"
+    if top=$(valid_repo "$answer"); then
+      save_repo "$top"
+      print $top
+      return
+    fi
+  done
+}
+
+# --- Commands that don't need the repository ---------------------------------------------
+
+cmd=${1:-help}
+case $cmd in
+  -h|--help|help) usage; exit 0 ;;
+  repo)
+    if [[ -n ${2:-} ]]; then
+      top=$(valid_repo "$2") || die "repository not changed"
+      save_repo "$top"
+    else
+      print $(repo_path)
+    fi
+    exit 0
+    ;;
+esac
+
+REPO=$(repo_path)
+cd "$REPO"
+STATE="$(git rev-parse --absolute-git-dir)/pid_checkpoint"
+mkdir -p "$STATE"
+
+YEAR=${PID_CHECKPOINT_YEAR:-$(git tag -l '[0-9][0-9][0-9][0-9]-*' | cut -d- -f1 | sort -u | tail -1)}
+[[ -n $YEAR ]] || die "no checkpoint tags found in $REPO (git fetch --tags?)"
+PROJECT="$REPO/$YEAR"
+
+# --- Checkpoints ------------------------------------------------------------------------
+
+# Checkpoint tags for a year, oldest first (history order = presentation order)
+checkpoints() {
+  local year=${1:-$YEAR}
+  local -A tag_at
+  local t
+  for t in $(git tag -l "$year-*"); do tag_at[$(git rev-parse "$t^{commit}")]+="$t "; done
+  local c
+  for c in $(git rev-list --reverse --topo-order $(git tag -l "$year-*")); do
+    [[ -n ${tag_at[$c]:-} ]] && print -l ${=tag_at[$c]}
+  done
+}
+
+current() { git describe --tags --exact-match --match "$YEAR-*" HEAD 2>/dev/null || true; }
+
+# A name ("p-control" or "2027-p-control") or a list number -> tag
+resolve() {
+  local want=$1 all=($(checkpoints))
+  if [[ $want == <-> ]]; then
+    (( want >= 1 && want <= ${#all} )) || die "no checkpoint #$want (there are ${#all})"
+    print ${all[$want]}
+  elif (( ${all[(Ie)$want]} )); then
+    print $want
+  elif (( ${all[(Ie)$YEAR-$want]} )); then
+    print $YEAR-$want
+  else
+    die "no checkpoint '$want' (see: $NAME list)"
+  fi
+}
+
+switch_to() {
+  local tag=$1
+  stop_sim
+  if [[ -n $(git status --porcelain) ]]; then
+    local from=$(current); from=${from:-$(git rev-parse --abbrev-ref HEAD)}
+    git stash push -q -u -m "pid_checkpoint: edits on $from ($(date '+%Y-%m-%d %H:%M'))"
+    echo "Stashed your uncommitted edits (git stash list; restore with git stash pop)."
+  fi
+  if [[ $tag == branch:* ]]; then git switch -q ${tag#branch:}; else git switch -q --detach "$tag"; fi
+  if [[ $tag == branch:* ]]; then
+    echo "On ${tag#branch:} ($(git describe --tags --always HEAD))"
+  else
+    local all=($(checkpoints)) n
+    n=${all[(Ie)$tag]}
+    echo "Now at #$n $tag: $(git tag -l --format='%(contents:subject)' $tag)"
+  fi
+}
+
+# --- Simulator --------------------------------------------------------------------------
+
+java_home() {
+  local jdk=(~/wpilib/$YEAR*/jdk(N/) ~/wpilib/*/jdk(N/))
+  print ${jdk[1]:-}
+}
+
+sim_pid() {
+  local pid=$(cat "$STATE/sim.pid" 2>/dev/null || true)
+  [[ -n $pid ]] && kill -0 $pid 2>/dev/null && print $pid || true
+}
+
+stop_sim() {
+  local pid=$(sim_pid)
+  [[ -n $pid ]] || return 0
+  echo "Stopping the simulator..."
+  # Ask Gradle to cancel the run (it stops the robot program), then make sure nothing's left
+  pkill -INT -P $pid 2>/dev/null || true
+  local i
+  for i in {1..30}; do kill -0 $pid 2>/dev/null || break; sleep 0.5; done
+  pkill -f "$PROJECT/build" 2>/dev/null || true
+  kill $pid 2>/dev/null || true
+  rm -f "$STATE/sim.pid"
+}
+
+start_sim() {
+  stop_sim
+  local jh=$(java_home)
+  [[ -n $jh ]] || die "no WPILib JDK found under ~/wpilib"
+  rm -f "$STATE/last-summary.shown"
+  local label=$(current); label=${label:-$(git describe --tags --always HEAD)}
+  nohup "$SELF" _runsim "$label" "$jh" >"$STATE/sim.log" 2>&1 &!
+  print $! >"$STATE/sim.pid"
+  # Wait (briefly) for the robot program to come up so a build failure shows here
+  local i
+  for i in {1..120}; do
+    grep -q 'Robot program startup complete' "$STATE/sim.log" 2>/dev/null && break
+    if ! kill -0 $(cat "$STATE/sim.pid") 2>/dev/null; then
+      tail -20 "$STATE/sim.log"; die "the simulator exited during startup (log: $STATE/sim.log)"
+    fi
+    sleep 0.5
+  done
+  echo "Simulator running ($label). Drag Keyboard 0 into Joystick[0], choose Teleop, Enable."
+}
+
+# Runs in the background: the simulator, then a summary + notification when it closes
+runsim() {
+  local label=$1
+  export JAVA_HOME=$2
+  local started=$(date +%s)
+  cd "$PROJECT"
+  ./gradlew run || true
+  local log=$(ls -t "$PROJECT"/logs/*.wpilog(N) 2>/dev/null | head -1)
+  {
+    echo "Last simulator session: $label ($(date '+%H:%M'), $(( ($(date +%s) - started) / 60 )) min)"
+    if [[ -n $log && $(stat -f %m "$log") -ge $started ]]; then
+      summarize "$log"
+    else
+      echo "  (no log for this session)"
+    fi
+  } >"$STATE/last-summary.txt" 2>&1
+  rm -f "$STATE/sim.pid"
+  osascript -e "display notification \"Run '$NAME status' for the summary\" with title \"Simulator closed\" subtitle \"$label\"" 2>/dev/null || true
+}
+
+# Print the summary of a finished session once
+show_last_session() {
+  [[ -f $STATE/last-summary.txt && ! -f $STATE/last-summary.shown ]] || return 0
+  cat "$STATE/last-summary.txt"
+  touch "$STATE/last-summary.shown"
+  echo
+}
+
+# Each C/V move from a session's .wpilog, with the gains in effect, overshoot, and where it
+# settled; warns when a dashboard (AdvantageScope's tuning mode) re-sent old tunables
+summarize() {
+  python3 -I - "$1" <<'PY'
+import re, struct, sys
+
+SETTLE = (2.0, 4.0)  # seconds after a move to measure where it settled
+RESENT_WITHIN = 1.5  # seconds after startup: faster than anyone types, so it's a dashboard
+
+
+def read_wpilog(path, wanted):
+    """Yields (seconds, entry name, value) for double entries whose name matches `wanted`."""
+    data = open(path, "rb").read()
+    if data[:6] != b"WPILOG":
+        raise SystemExit(f"{path}: not a WPILOG file")
+    pos = 8 + 4 + struct.unpack_from("<I", data, 8)[0]
+    entries = {}
+
+    def field(n):
+        nonlocal pos
+        value = int.from_bytes(data[pos:pos + n], "little")
+        pos += n
+        return value
+
+    while pos < len(data):
+        header = data[pos]
+        pos += 1
+        entry = field((header & 3) + 1)
+        size = field(((header >> 2) & 3) + 1)
+        timestamp = field(((header >> 4) & 7) + 1)
+        payload = data[pos:pos + size]
+        pos += size
+        if entry == 0:  # control record
+            if payload and payload[0] == 0:  # start: id, name, type, metadata
+                new_id = struct.unpack_from("<I", payload, 1)[0]
+                o = 5
+                n = struct.unpack_from("<I", payload, o)[0]
+                name = payload[o + 4:o + 4 + n].decode(errors="replace")
+                o += 4 + n
+                n = struct.unpack_from("<I", payload, o)[0]
+                entries[new_id] = (name, payload[o + 4:o + 4 + n].decode(errors="replace"))
+            continue
+        name, kind = entries.get(entry, ("", ""))
+        if kind == "double" and size == 8 and wanted.search(name):
+            yield timestamp / 1e6, name, struct.unpack("<d", payload)[0]
+
+
+rows = list(read_wpilog(sys.argv[1], re.compile(r"/Tunables/|Elevator/(Target|Current) Position")))
+if not rows:
+    print("  (no elevator data in this session)")
+    sys.exit()
+start = rows[0][0]
+
+# Tunables: the robot publishes its defaults first; a different value within a moment of
+# startup came from a dashboard, not a person
+gains, defaults, resent = {}, {}, {}
+for t, name, value in rows:
+    if "/Tunables/" not in name:
+        continue
+    key = name.rsplit("/", 1)[1]
+    if key not in defaults:
+        defaults[key] = value
+    elif t - start < RESENT_WITHIN and value != defaults[key]:
+        resent[key] = value
+
+moves, target = [], None
+for t, name, value in rows:
+    if "/Tunables/" in name:
+        gains[name.rsplit("/", 1)[1]] = value
+    elif "Target Position" in name:
+        if value != target and t - start > 0.5:  # skip the startup target
+            moves.append({"t": t, "target": value, "gains": dict(gains), "pos": []})
+        target = value
+    elif moves:
+        moves[-1]["pos"].append((t, value))
+
+if resent:
+    changes = ", ".join(f"{k} {defaults[k]:g} -> {v:g}" for k, v in sorted(resent.items()))
+    print(f"  WARNING: a dashboard re-sent old tunables at startup ({changes}).")
+    print("           Turn off AdvantageScope's tuning mode (or restart it) to get the defaults.")
+if not moves:
+    print("  (no C/V moves)")
+    sys.exit()
+
+print(f"  {'time':>6}  {'move':<14} {'gains':<34} {'overshoot':>9}  {'settled':>9}")
+for i, m in enumerate(moves):
+    end = moves[i + 1]["t"] if i + 1 < len(moves) else float("inf")
+    pts = [(t - m["t"], p) for t, p in m["pos"] if t < end]
+    if not pts:
+        continue
+    begin = pts[0][1]
+    direction = 1 if m["target"] > begin else -1
+    overshoot = max(direction * (p - m["target"]) for _, p in pts) * 100
+    held = [p for dt, p in pts if SETTLE[0] <= dt <= SETTLE[1]]
+    settled = f"{(sum(held) / len(held) - m['target']) * 100:+.1f} cm" if held else "(moved on)"
+    g = m["gains"]
+    shown = "  ".join(f"{k}={g[k]:g}" for k in ("kP", "kI", "kD", "kIZone") if k in g) or "-"
+    print(f"  {m['t'] - start:5.0f}s  {begin:.2f} -> {m['target']:.1f} m  {shown:<34} "
+          f"{max(overshoot, 0):6.1f} cm  {settled:>9}")
+PY
+}
+
+# --- Response test ----------------------------------------------------------------------
+
+run_test() {
+  local tag=${1:-} tunables=${2:-} dir=$PROJECT tmp=""
+  if [[ -n $tag && $tag != $(current) ]]; then
+    tmp=$(mktemp -d)
+    git worktree add -q --detach "$tmp" "$tag"
+    dir="$tmp/$YEAR"
+  fi
+  local label=${tag:-$(current)}
+  echo "Response test: ${label:-working tree}${tunables:+ with $tunables} (about 20 s)"
+  ( cd "$dir" && RESPONSE_TUNABLES="$tunables" RESPONSE_TEST=1 JAVA_HOME=$(java_home) \
+      ./gradlew test --tests '*ElevatorResponseTest' --rerun 2>&1 ) |
+    grep -E 'Tunables:|Wrote|Move|->|FAILED|error:' | sed 's/^ *//'
+  if [[ -n $tmp ]]; then
+    mkdir -p "$PROJECT/build/response"
+    cp "$dir"/build/response/*.csv(N) "$PROJECT/build/response/" 2>/dev/null || true
+    echo "CSV copied to $YEAR/build/response/"
+    git worktree remove --force "$tmp"
+  fi
+}
+
+# --- Yearly replay ----------------------------------------------------------------------
+
+# Tag <to>'s replayed commits: <to>-<name> on the last commit whose subject starts "<name>:",
+# copying the message of <from>-<name>
+retag() {
+  local from=$1 to=$2 base=${3:-}
+  if [[ -z $base ]]; then
+    base=$(git rev-parse -q --verify "$to-manual^{commit}" 2>/dev/null) || die "$to-manual isn't tagged; run replay first"
+  fi
+  local c subj name
+  for c in $(git rev-list --reverse "$base..HEAD"); do
+    subj=$(git log -1 --format=%s $c)
+    name=${subj%%:*}
+    [[ $name != $subj ]] || continue
+    git tag -f -a "$to-$name" -m "$(git tag -l --format='%(contents)' "$from-$name")" $c >/dev/null
+    echo "  tagged $to-$name"
+  done
+}
+
+replay() {
+  local from=$1 to=$2
+  [[ -d $REPO/$to ]] || die "import the project into $to/ and commit it first"
+  [[ -z $(git status --porcelain) ]] || die "commit or stash your changes first"
+  git rev-parse -q --verify "$from-manual" >/dev/null || die "no $from checkpoints"
+  local fromtags=($(checkpoints $from))
+  local last=${fromtags[-1]} base=$(git rev-parse HEAD)
+  git tag -f -a "$to-manual" -m "$(git tag -l --format='%(contents)' "$from-manual")" HEAD >/dev/null
+  echo "  tagged $to-manual (the imported project)"
+  local patches=$(mktemp -d)
+  git format-patch -q --relative="$from" "$from-manual..$last" -o "$patches"
+  echo "Replaying $(ls $patches | wc -l | tr -d ' ') commits from $from-manual..$last into $to/"
+  if ! git am -q --directory="$to" "$patches"/*.patch; then
+    echo
+    echo "A commit didn't apply cleanly (an API probably changed). Fix the files, then:"
+    echo "  git add -A && git am --continue      (repeat until done)"
+    echo "  $NAME retag $from $to"
+    exit 1
+  fi
+  retag "$from" "$to" "$base"
+  rm -rf "$patches"
+}
+
+# --- Commands ---------------------------------------------------------------------------
+
+[[ $cmd == _runsim ]] && { runsim "$2" "$3"; exit 0; }
+show_last_session
+(( $# )) && shift
+
+case $cmd in
+  list)
+    all=($(checkpoints)) here=$(current) i=1
+    for t in $all; do
+      printf "%s %2d  %-26s %s\n" "$([[ $t == $here ]] && echo '*' || echo ' ')" $i $t \
+        "$(git tag -l --format='%(contents:subject)' $t)"
+      (( i++ ))
+    done
+    ;;
+  go)
+    [[ -n ${1:-} ]] || die "usage: $NAME go <name|#> [--run]"
+    switch_to $(resolve $1)
+    if [[ ${2:-} == --run ]]; then start_sim; fi
+    ;;
+  first|last)
+    all=($(checkpoints))
+    switch_to ${all[$([[ $cmd == first ]] && echo 1 || echo ${#all})]}
+    if [[ ${1:-} == --run ]]; then start_sim; fi
+    ;;
+  next|prev)
+    all=($(checkpoints)) here=$(current)
+    [[ -n $here ]] || die "not at a checkpoint; start with: $NAME first --run"
+    i=${all[(Ie)$here]}
+    if [[ $cmd == next ]]; then i=$(( i + 1 )); else i=$(( i - 1 )); fi
+    if (( i < 1 || i > ${#all} )); then
+      die "already at the $([[ $cmd == next ]] && echo last || echo first) checkpoint ($here)"
+    fi
+    switch_to ${all[$i]}
+    start_sim
+    ;;
+  run) start_sim ;;
+  stop) stop_sim ;;
+  status)
+    here=$(current)
+    echo "Repository: $REPO"
+    echo "At: ${here:-$(git describe --tags --always HEAD) (not a checkpoint)}"
+    if [[ -n $(git status --porcelain) ]]; then echo "Uncommitted edits: yes"; fi
+    if [[ -n $(sim_pid) ]]; then echo "Simulator: running (log: $STATE/sim.log)"; else echo "Simulator: not running"; fi
+    if [[ -f $STATE/last-summary.txt ]]; then
+      echo; cat "$STATE/last-summary.txt"; touch "$STATE/last-summary.shown"
+    fi
+    ;;
+  summary)
+    log=${1:-$(ls -t "$PROJECT"/logs/*.wpilog(N) | head -1)}
+    [[ -n $log ]] || die "no logs in $PROJECT/logs"
+    echo "Session: ${log:t}"
+    summarize "$log"
+    ;;
+  test)
+    tag="" tunables=""
+    for a in "$@"; do [[ $a == *=* ]] && tunables=$a || tag=$(resolve $a); done
+    run_test "$tag" "$tunables"
+    ;;
+  home)
+    if git rev-parse -q --verify "refs/heads/$YEAR-checkpoints" >/dev/null; then
+      switch_to "branch:$YEAR-checkpoints"
+    else
+      switch_to branch:main
+    fi
+    ;;
+  replay) [[ $# -eq 2 ]] || die "usage: $NAME replay <from year> <to year>"; replay $1 $2 ;;
+  retag) [[ $# -eq 2 ]] || die "usage: $NAME retag <from year> <to year>"; retag $1 $2 ;;
+  *) die "unknown command '$cmd' (try: $NAME help)" ;;
+esac
