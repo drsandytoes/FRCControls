@@ -243,6 +243,8 @@ summarize() {
 import re, struct, sys
 
 SETTLE = (2.0, 4.0)  # seconds after a move to measure where it settled
+ORDER = ["kP", "kI", "kD", "kIZone", "kG", "kV", "CruiseVelocity", "Acceleration"]
+LABELS = {"CruiseVelocity": "cruise", "Acceleration": "accel"}
 RESENT_WITHIN = 1.5  # seconds after startup: faster than anyone types, so it's a dashboard
 
 
@@ -295,7 +297,7 @@ gains, defaults, resent = {}, {}, {}
 for t, name, value in rows:
     if "/Tunables/" not in name:
         continue
-    key = name.rsplit("/", 1)[1]
+    key = name.split("/Tunables/", 1)[1]  # e.g. "kP" or "TalonFX/kP"
     if key not in defaults:
         defaults[key] = value
     elif t - start < RESENT_WITHIN and value != defaults[key]:
@@ -304,7 +306,7 @@ for t, name, value in rows:
 moves, target = [], None
 for t, name, value in rows:
     if "/Tunables/" in name:
-        gains[name.rsplit("/", 1)[1]] = value
+        gains[name.split("/Tunables/", 1)[1]] = value
     elif "Target Position" in name:
         if value != target and t - start > 0.5:  # skip the startup target
             moves.append({"t": t, "target": value, "gains": dict(gains), "pos": []})
@@ -320,7 +322,17 @@ if not moves:
     print("  (no C/V moves)")
     sys.exit()
 
-print(f"  {'time':>6}  {'move':<14} {'gains':<34} {'overshoot':>9}  {'settled':>9}")
+def shown(gains):
+    """Every tunable in the session, in a familiar order, without the TalonFX/ prefix."""
+    rank = lambda k: ORDER.index(k.split("/")[-1]) if k.split("/")[-1] in ORDER else len(ORDER)
+    return "  ".join(f"{LABELS.get(k.split('/')[-1], k.split('/')[-1])}={gains[k]:g}"
+                     for k in sorted(gains, key=rank)) or "-"
+
+
+if any(k.startswith("TalonFX/") for k in defaults):
+    print("  (TalonFX gains are in motor rotations: kP V/rot, kV V/rps, cruise rot/s, accel rot/s²)")
+width = max(len(shown(m["gains"])) for m in moves)
+print(f"  {'time':>6}  {'move':<14} {'gains':<{width}} {'overshoot':>9}  {'settled':>9}")
 for i, m in enumerate(moves):
     end = moves[i + 1]["t"] if i + 1 < len(moves) else float("inf")
     pts = [(t - m["t"], p) for t, p in m["pos"] if t < end]
@@ -331,9 +343,7 @@ for i, m in enumerate(moves):
     overshoot = max(direction * (p - m["target"]) for _, p in pts) * 100
     held = [p for dt, p in pts if SETTLE[0] <= dt <= SETTLE[1]]
     settled = f"{(sum(held) / len(held) - m['target']) * 100:+.1f} cm" if held else "(moved on)"
-    g = m["gains"]
-    shown = "  ".join(f"{k}={g[k]:g}" for k in ("kP", "kI", "kD", "kIZone") if k in g) or "-"
-    print(f"  {m['t'] - start:5.0f}s  {begin:.2f} -> {m['target']:.1f} m  {shown:<34} "
+    print(f"  {m['t'] - start:5.0f}s  {begin:.2f} -> {m['target']:.1f} m  {shown(m['gains']):<{width}} "
           f"{max(overshoot, 0):6.1f} cm  {settled:>9}")
 PY
 }
