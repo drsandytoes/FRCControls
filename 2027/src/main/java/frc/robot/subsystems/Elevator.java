@@ -1,18 +1,17 @@
 package frc.robot.subsystems;
 
 import com.ctre.phoenix6.CANBus;
+import com.ctre.phoenix6.configs.TalonFXConfiguration;
+import com.ctre.phoenix6.controls.MotionMagicVoltage;
 import com.ctre.phoenix6.hardware.TalonFX;
+import com.ctre.phoenix6.signals.GravityTypeValue;
 import com.ctre.phoenix6.sim.TalonFXSimState;
 import dev.doglog.DogLog;
-import org.wpilib.math.controller.ElevatorFeedforward;
-import org.wpilib.math.controller.ProfiledPIDController;
 import org.wpilib.math.system.DCMotor;
-import org.wpilib.math.trajectory.TrapezoidProfile.Constraints;
 import org.wpilib.math.util.Units;
 import org.wpilib.system.RobotController;
 import org.wpilib.simulation.ElevatorSim;
 import org.wpilib.telemetry.Telemetry;
-import org.wpilib.tunable.TunableDouble;
 import org.wpilib.smartdashboard.Mechanism2d;
 import org.wpilib.smartdashboard.MechanismLigament2d;
 import org.wpilib.smartdashboard.MechanismRoot2d;
@@ -33,23 +32,27 @@ public class Elevator extends SubsystemBase {
   private double m_targetVoltage = 0.0;
   private double m_targetPosition = 0.0;
 
-  private TunableDouble m_tunable_kP = DogLog.tunable("kP", 100.0);
-  private TunableDouble m_tunable_kD = DogLog.tunable("kD", 0.0);
-  private TunableDouble m_tunable_kI = DogLog.tunable("kI", 0.0);
-  private TunableDouble m_tunable_kIZone = DogLog.tunable("kIZone", 0.01);
-
-  // WPILib's versions of what we built by hand: PID following a trapezoid profile, and
-  // gravity + velocity feedforward (kS = 0, kG = 1.1 V, kV = 4.6 V per m/s)
-  private final ProfiledPIDController m_controller =
-      new ProfiledPIDController(100.0, 0.0, 0.0, new Constraints(1.0, 2.0), Robot.periodSecs);
-  private final ElevatorFeedforward m_feedforward = new ElevatorFeedforward(0.0, 1.1, 4.6);
+  // The TalonFX runs the profile and PIDF itself (Motion Magic); we just send it the target
+  private final MotionMagicVoltage m_magic = new MotionMagicVoltage(0.0);
 
   enum ControlMode {
     VOLTAGE,
     POSITION,
   }
 
-  public Elevator() {}
+  public Elevator() {
+    // Units are motor rotations: our tuned values / 37.6 motor rotations per meter
+    TalonFXConfiguration config = new TalonFXConfiguration();
+    config.Slot0.kP = 2.66; // V per rotation of error (100 V/m)
+    config.Slot0.kI = 0.0;
+    config.Slot0.kD = 0.0;
+    config.Slot0.kG = 1.1; // V to hold against gravity (no unit conversion needed)
+    config.Slot0.kV = 0.122; // V per rotation/s (4.6 V per m/s)
+    config.Slot0.GravityType = GravityTypeValue.Elevator_Static;
+    config.MotionMagic.MotionMagicCruiseVelocity = 37.6; // rotations/s (1 m/s)
+    config.MotionMagic.MotionMagicAcceleration = 75.2; // rotations/s² (2 m/s²)
+    m_motor.getConfigurator().apply(config);
+  }
 
   public Command setVoltageCommand(double voltage) {
     return runOnce(
@@ -64,9 +67,6 @@ public class Elevator extends SubsystemBase {
         () -> {
           m_controlMode = ControlMode.POSITION;
           m_targetPosition = setpoint;
-
-          // Start the profile from where the elevator is now (also clears the I term)
-          m_controller.reset(getCurrentPosition(), getCurrentVelocity());
         });
   }
 
@@ -92,16 +92,12 @@ public class Elevator extends SubsystemBase {
         }
       case POSITION:
         {
-          m_controller.setPID(m_tunable_kP.get(), m_tunable_kI.get(), m_tunable_kD.get());
-          m_controller.setIZone(m_tunable_kIZone.get());
+          m_motor.setControl(m_magic.withPosition(m_targetPosition * kRotationsPerMeter));
 
-          // PID toward the profile's next state, plus feedforward for that state's velocity
-          double pidVolts = m_controller.calculate(currentPosition, m_targetPosition);
-          var setpoint = m_controller.getSetpoint();
-          DogLog.log("Elevator/Profile Position (m)", setpoint.position);
-          DogLog.log("Elevator/Profile Velocity (m per s)", setpoint.velocity);
-
-          m_motor.setVoltage(pidVolts + m_feedforward.calculate(setpoint.velocity));
+          // The TalonFX's own profile position, for graphing
+          DogLog.log(
+              "Elevator/Profile Position (m)",
+              m_motor.getClosedLoopReference().getValueAsDouble() / kRotationsPerMeter);
           break;
         }
     }
@@ -110,7 +106,6 @@ public class Elevator extends SubsystemBase {
     DogLog.log("Elevator/Duty Cycle", m_motor.getDutyCycle().getValueAsDouble());
     DogLog.log("Elevator/Current Position (m)", currentPosition);
     DogLog.log("Elevator/Target Position (m)", m_targetPosition);
-    DogLog.log("Elevator/iError", m_controller.getAccumulatedError());
   }
 
   // --- BEGIN STUFF FOR SIMULATION ---
