@@ -285,11 +285,15 @@ def read_wpilog(path, wanted):
             yield timestamp / 1e6, name, struct.unpack("<d", payload)[0]
 
 
-rows = list(read_wpilog(sys.argv[1], re.compile(r"/Tunables/|Elevator/(Target|Current) Position")))
+rows = list(read_wpilog(sys.argv[1], re.compile(
+    r"/Tunables/|Elevator/(Target|Current) Position|Arm/(Target|Current) Angle")))
 if not rows:
     print("  (no elevator data in this session)")
     sys.exit()
 start = rows[0][0]
+# The elevator logs meters (shown in cm); the arm logs degrees
+ARM = any("Arm/" in name and "/Tunables/" not in name for _, name, _ in rows)
+SCALE, UNIT = (1, "°") if ARM else (100, " cm")
 
 # Tunables: the robot publishes its defaults first; a different value within a moment of
 # startup came from a dashboard, not a person
@@ -307,7 +311,7 @@ moves, target = [], None
 for t, name, value in rows:
     if "/Tunables/" in name:
         gains[name.split("/Tunables/", 1)[1]] = value
-    elif "Target Position" in name:
+    elif "Target" in name:
         if value != target and t - start > 0.5:  # skip the startup target
             moves.append({"t": t, "target": value, "gains": dict(gains), "pos": []})
         target = value
@@ -331,8 +335,10 @@ def shown(gains):
 
 if any(k.startswith("TalonFX/") for k in defaults):
     print("  (TalonFX gains are in motor rotations: kP V/rot, kV V/rps, cruise rot/s, accel rot/s²)")
+if any(k.startswith("Arm/") for k in defaults):
+    print("  (Arm gains are in arm rotations: kP V/rot, kV V/rps, cruise rot/s, accel rot/s²)")
 width = max(len(shown(m["gains"])) for m in moves)
-print(f"  {'time':>6}  {'move':<14} {'gains':<{width}} {'overshoot':>9}  {'settled':>9}")
+print(f"  {'time':>6}  {'move':<16} {'gains':<{width}} {'overshoot':>9}  {'settled':>9}")
 for i, m in enumerate(moves):
     end = moves[i + 1]["t"] if i + 1 < len(moves) else float("inf")
     pts = [(t - m["t"], p) for t, p in m["pos"] if t < end]
@@ -340,11 +346,14 @@ for i, m in enumerate(moves):
         continue
     begin = pts[0][1]
     direction = 1 if m["target"] > begin else -1
-    overshoot = max(direction * (p - m["target"]) for _, p in pts) * 100
+    overshoot = max(direction * (p - m["target"]) for _, p in pts) * SCALE
     held = [p for dt, p in pts if SETTLE[0] <= dt <= SETTLE[1]]
-    settled = f"{(sum(held) / len(held) - m['target']) * 100:+.1f} cm" if held else "(moved on)"
-    print(f"  {m['t'] - start:5.0f}s  {begin:.2f} -> {m['target']:.1f} m  {shown(m['gains']):<{width}} "
-          f"{max(overshoot, 0):6.1f} cm  {settled:>9}")
+    settled = (f"{(sum(held) / len(held) - m['target']) * SCALE:+.1f}{UNIT}" if held
+               else "(moved on)")
+    move = (f"{begin:.0f}° -> {m['target']:.0f}°" if ARM
+            else f"{begin:.2f} -> {m['target']:.1f} m")
+    print(f"  {m['t'] - start:5.0f}s  {move:<16} {shown(m['gains']):<{width}} "
+          f"{max(overshoot, 0):6.1f}{UNIT:<3} {settled:>9}")
 PY
 }
 
@@ -358,9 +367,12 @@ run_test() {
     dir="$tmp/$YEAR"
   fi
   local label=${tag:-$(current)}
-  echo "Response test: ${label:-working tree}${tunables:+ with $tunables} (about 20 s)"
+  # Test whichever mechanism the robot drives at this checkpoint
+  local test=ElevatorResponseTest
+  grep -q 'new Arm()' "$dir/src/main/java/frc/robot/RobotContainer.java" && test=ArmResponseTest
+  echo "Response test: ${label:-working tree}${tunables:+ with $tunables} ($test, about 20-25 s)"
   ( cd "$dir" && RESPONSE_TUNABLES="$tunables" RESPONSE_TEST=1 JAVA_HOME=$(java_home) \
-      ./gradlew test --tests '*ElevatorResponseTest' --rerun 2>&1 ) |
+      ./gradlew test --tests "*$test" --rerun 2>&1 ) |
     grep -E 'Tunables:|Wrote|Move|->|FAILED|error:' | sed 's/^ *//'
   if [[ -n $tmp ]]; then
     mkdir -p "$PROJECT/build/response"
