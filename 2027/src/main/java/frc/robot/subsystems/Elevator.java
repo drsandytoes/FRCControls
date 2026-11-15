@@ -4,13 +4,12 @@ import com.ctre.phoenix6.CANBus;
 import com.ctre.phoenix6.hardware.TalonFX;
 import com.ctre.phoenix6.sim.TalonFXSimState;
 import dev.doglog.DogLog;
+import org.wpilib.math.controller.ElevatorFeedforward;
+import org.wpilib.math.controller.ProfiledPIDController;
 import org.wpilib.math.system.DCMotor;
-import org.wpilib.math.trajectory.TrapezoidProfile;
 import org.wpilib.math.trajectory.TrapezoidProfile.Constraints;
-import org.wpilib.math.trajectory.TrapezoidProfile.State;
 import org.wpilib.math.util.Units;
 import org.wpilib.system.RobotController;
-import org.wpilib.system.Timer;
 import org.wpilib.simulation.ElevatorSim;
 import org.wpilib.telemetry.Telemetry;
 import org.wpilib.tunable.TunableDouble;
@@ -39,14 +38,11 @@ public class Elevator extends SubsystemBase {
   private TunableDouble m_tunable_kI = DogLog.tunable("kI", 0.0);
   private TunableDouble m_tunable_kIZone = DogLog.tunable("kIZone", 0.01);
 
-  private final Timer m_timer = new Timer();
-  private double m_lastError = 0.0;
-  private double m_iError = 0.0;
-
-  private final Timer m_profileTimer = new Timer();
-  private final TrapezoidProfile m_profile = new TrapezoidProfile(new Constraints(1.0, 2.0));
-  private State m_startState = new State();
-  private State m_goalState = new State();
+  // WPILib's versions of what we built by hand: PID following a trapezoid profile, and
+  // gravity + velocity feedforward (kS = 0, kG = 1.1 V, kV = 4.6 V per m/s)
+  private final ProfiledPIDController m_controller =
+      new ProfiledPIDController(100.0, 0.0, 0.0, new Constraints(1.0, 2.0), Robot.periodSecs);
+  private final ElevatorFeedforward m_feedforward = new ElevatorFeedforward(0.0, 1.1, 4.6);
 
   enum ControlMode {
     VOLTAGE,
@@ -69,13 +65,8 @@ public class Elevator extends SubsystemBase {
           m_controlMode = ControlMode.POSITION;
           m_targetPosition = setpoint;
 
-          m_timer.restart();
-          m_lastError = 0.0; // the profile starts at the current position
-          m_iError = 0.0;
-
-          m_profileTimer.restart();
-          m_startState = new State(getCurrentPosition(), getCurrentVelocity());
-          m_goalState = new State(m_targetPosition, 0.0);
+          // Start the profile from where the elevator is now (also clears the I term)
+          m_controller.reset(getCurrentPosition(), getCurrentVelocity());
         });
   }
 
@@ -101,35 +92,16 @@ public class Elevator extends SubsystemBase {
         }
       case POSITION:
         {
-          // Sample profile
-          final State profileState =
-              m_profile.calculate(m_profileTimer.get(), m_startState, m_goalState);
-          DogLog.log("Elevator/Profile Position (m)", profileState.position);
-          DogLog.log("Elevator/Profile Velocity (m per s)", profileState.velocity);
+          m_controller.setPID(m_tunable_kP.get(), m_tunable_kI.get(), m_tunable_kD.get());
+          m_controller.setIZone(m_tunable_kIZone.get());
 
-          // PID control w/ trapezoidal profile
-          double error = profileState.position - currentPosition;
-          double dError = (error - m_lastError) / m_timer.get();
-          m_iError = m_iError + error * m_timer.get();
+          // PID toward the profile's next state, plus feedforward for that state's velocity
+          double pidVolts = m_controller.calculate(currentPosition, m_targetPosition);
+          var setpoint = m_controller.getSetpoint();
+          DogLog.log("Elevator/Profile Position (m)", setpoint.position);
+          DogLog.log("Elevator/Profile Velocity (m per s)", setpoint.velocity);
 
-          // Reset integral if position error is greater than |kIZone|
-          double kIZone = m_tunable_kIZone.get();
-          if (Math.abs(error) > kIZone) {
-            m_iError = 0.0;
-          }
-
-          double kP = m_tunable_kP.get();
-          double kD = m_tunable_kD.get();
-          double kI = m_tunable_kI.get();
-
-          // Velocity + Gravity FF
-          double kV = 4.6; // volts per meter per second
-          double kG = 1.1; // volts
-
-          m_motor.setVoltage(
-              error * kP + dError * kD + m_iError * kI + kV * profileState.velocity + kG);
-          m_timer.reset();
-          m_lastError = error;
+          m_motor.setVoltage(pidVolts + m_feedforward.calculate(setpoint.velocity));
           break;
         }
     }
@@ -138,7 +110,7 @@ public class Elevator extends SubsystemBase {
     DogLog.log("Elevator/Duty Cycle", m_motor.getDutyCycle().getValueAsDouble());
     DogLog.log("Elevator/Current Position (m)", currentPosition);
     DogLog.log("Elevator/Target Position (m)", m_targetPosition);
-    DogLog.log("Elevator/iError", m_iError);
+    DogLog.log("Elevator/iError", m_controller.getAccumulatedError());
   }
 
   // --- BEGIN STUFF FOR SIMULATION ---
