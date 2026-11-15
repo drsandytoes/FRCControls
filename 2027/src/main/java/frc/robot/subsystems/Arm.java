@@ -73,8 +73,9 @@ public class Arm extends SubsystemBase {
     m_config.Slot0.kD = m_tunable_kD.get();
     m_config.Slot0.kG = m_tunable_kG.get(); // V to hold the arm horizontal
     m_config.Slot0.kV = m_tunable_kV.get(); // V per arm rotation/s (12 V / 2.41 rot/s)
-    // The same constant gravity feedforward we used for the elevator
-    m_config.Slot0.GravityType = GravityTypeValue.Elevator_Static;
+    // Gravity's torque on an arm is largest horizontal and zero straight up or down, so scale
+    // kG by cos(angle); this needs position 0 = horizontal, in arm rotations
+    m_config.Slot0.GravityType = GravityTypeValue.Arm_Cosine;
     m_config.MotionMagic.MotionMagicCruiseVelocity = m_tunable_cruiseVelocity.get(); // rot/s
     m_config.MotionMagic.MotionMagicAcceleration = m_tunable_acceleration.get(); // rot/s²
     m_motor.getConfigurator().apply(m_config);
